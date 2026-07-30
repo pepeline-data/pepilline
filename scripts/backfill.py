@@ -1,3 +1,11 @@
+"""
+backfill.py
+
+Livrable Membre 2 (HIRAINA).
+Boucle sur les 5 villes du projet x environ 12 mois d'historique,
+découpé en tranches de 30 jours.
+"""
+
 import sys
 import os
 import time
@@ -5,7 +13,7 @@ import argparse
 from datetime import datetime, timedelta, timezone
 
 sys.path.append(os.path.dirname(__file__))
-from fetch_city import fetch_city_history
+from fetch_city import fetch_city
 
 VILLES = [
     {"name": "Antananarivo", "lat": -18.8792, "lon": 47.5079},
@@ -53,9 +61,9 @@ def run_backfill(months: int = 12):
     for ville in VILLES:
         for start_ts, end_ts in chunks:
             try:
-                filepath = fetch_city_history(
+                filepath = fetch_city(
                     ville["name"], ville["lat"], ville["lon"],
-                    start_ts, end_ts, raw_dir=RAW_DIR,
+                    start=start_ts, end=end_ts, raw_dir=RAW_DIR,
                 )
                 if filepath is None:
                     skipped += 1
