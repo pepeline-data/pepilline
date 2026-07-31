@@ -1,15 +1,6 @@
-"""
-backfill.py
-
-Livrable Membre 2 (HIRAINA).
-Boucle sur les 5 villes du projet x environ 12 mois d'historique,
-découpé en tranches de 30 jours.
-"""
-
 import sys
 import os
 import time
-import argparse
 from datetime import datetime, timedelta, timezone
 
 sys.path.append(os.path.dirname(__file__))
@@ -17,74 +8,39 @@ from fetch_city import fetch_city
 
 VILLES = [
     {"name": "Antananarivo", "lat": -18.8792, "lon": 47.5079},
-    {"name": "New Delhi", "lat": 28.6139, "lon": 77.2090},
-    {"name": "Paris", "lat": 48.8566, "lon": 2.3522},
-    {"name": "Los Angeles", "lat": 34.0522, "lon": -118.2437},
-    {"name": "Reykjavik", "lat": 64.1466, "lon": -21.9426},
+    {"name": "New Delhi",    "lat": 28.6139,  "lon": 77.2090},
+    {"name": "Paris",        "lat": 48.8566,  "lon": 2.3522},
+    {"name": "Los Angeles",  "lat": 34.0522,  "lon": -118.2437},
+    {"name": "Reykjavik",    "lat": 64.1466,  "lon": -21.9426},
 ]
 
-CHUNK_DAYS = 30
-SLEEP_BETWEEN_CALLS = 1
-
-RAW_DIR = os.path.join(os.path.dirname(__file__), "..", "raw")
+MONTHS_BACK = 12
 
 
-def build_chunks(months: int, now: datetime):
-    """Découpe la période [now - months*30j, now] en tranches de CHUNK_DAYS jours."""
-    total_days = months * 30
+def generate_monthly_chunks(months_back):
+    """Génère des tranches (start, end) en timestamp Unix, une par mois, du plus ancien au plus récent."""
+    now = datetime.now(timezone.utc)
     chunks = []
-    period_start = now - timedelta(days=total_days)
-
-    cursor = period_start
-    while cursor < now:
-        chunk_end = min(cursor + timedelta(days=CHUNK_DAYS), now)
-        chunks.append((int(cursor.timestamp()), int(chunk_end.timestamp())))
-        cursor = chunk_end
-
+    for i in range(months_back, 0, -1):
+        end_dt = now - timedelta(days=(i - 1) * 30)
+        start_dt = now - timedelta(days=i * 30)
+        chunks.append((int(start_dt.timestamp()), int(end_dt.timestamp())))
     return chunks
 
 
-def run_backfill(months: int = 12):
-    now = datetime.now(timezone.utc)
-    chunks = build_chunks(months, now)
-
-    total = len(VILLES) * len(chunks)
-    done = 0
-    skipped = 0
-    errors = 0
-
-    print(
-        f"Backfill : {len(VILLES)} villes x {len(chunks)} tranches de {CHUNK_DAYS}j "
-        f"({total} appels max)"
-    )
+def run_backfill():
+    chunks = generate_monthly_chunks(MONTHS_BACK)
+    total_calls = len(VILLES) * len(chunks)
+    call_count = 0
 
     for ville in VILLES:
-        for start_ts, end_ts in chunks:
-            try:
-                filepath = fetch_city(
-                    ville["name"], ville["lat"], ville["lon"],
-                    start=start_ts, end=end_ts, raw_dir=RAW_DIR,
-                )
-                if filepath is None:
-                    skipped += 1
-                    print(f"  [skip] {ville['name']} {start_ts}-{end_ts} (déjà présent)")
-                else:
-                    done += 1
-                    print(f"  [ok]   {ville['name']} {start_ts}-{end_ts} -> {filepath}")
-                    time.sleep(SLEEP_BETWEEN_CALLS)
-            except Exception as e:
-                errors += 1
-                print(f"  [ERREUR] {ville['name']} {start_ts}-{end_ts} : {e}")
-
-    print(f"\nTerminé. {done} téléchargés, {skipped} déjà présents (skip), {errors} erreurs.")
+        for start, end in chunks:
+            call_count += 1
+            print(f"[{call_count}/{total_calls}] {ville['name']} : {datetime.fromtimestamp(start, tz=timezone.utc).date()} -> {datetime.fromtimestamp(end, tz=timezone.utc).date()}")
+            fetch_city(ville["name"], ville["lat"], ville["lon"], start=start, end=end)
+            time.sleep(1)  # petite pause pour ne pas saturer l'API
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Backfill AQI 12 mois pour les 5 villes")
-    parser.add_argument(
-        "--months", type=int, default=12,
-        help="Nombre de mois d'historique à récupérer (défaut : 12)",
-    )
-    args = parser.parse_args()
 
-    run_backfill(months=args.months)
+    run_backfill()
