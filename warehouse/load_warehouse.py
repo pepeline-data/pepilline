@@ -1,161 +1,94 @@
-#!/usr/bin/env python3
-
 import os
-import sys
-from datetime import datetime
-
+import uuid
 import pandas as pd
-from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
 
-COLUMN_CITY_NAME = "city"
-COLUMN_COUNTRY = "country"
-COLUMN_LAT = "latitude"
-COLUMN_LON = "longitude"
-COLUMN_DATETIME = "datetime"
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
-POLLUTANT_COLUMNS = ["aqi", "co", "no", "no2", "o3", "so2", "pm2_5", "pm10", "nh3"]
-
-
-def get_engine():
-    load_dotenv()
-    db_url = os.getenv("DATABASE_URL")
-    if not db_url:
-        sys.exit("ERREUR : DATABASE_URL manquant. Copie .env.example en .env et remplis-le.")
-    return create_engine(db_url)
+DATABASE_URL = os.getenv("DATABASE_URL")
+CLEAN_FILE = os.path.join(PROJECT_ROOT, "clean", "aqi_clean.csv")
 
 
-def load_clean_csv():
-    load_dotenv()
-    csv_path = os.getenv("CLEAN_CSV_PATH", "clean/aqi_clean.csv")
-    if not os.path.exists(csv_path):
-        sys.exit(f"ERREUR : fichier introuvable : {csv_path}")
-
-    df = pd.read_csv(csv_path)
-
-    required = [COLUMN_CITY_NAME, COLUMN_COUNTRY, COLUMN_LAT, COLUMN_LON, COLUMN_DATETIME]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        sys.exit(
-            f"ERREUR : colonnes attendues absentes du CSV : {missing}\n"
-            f"Colonnes disponibles : {list(df.columns)}\n"
-            "-> Adapte les constantes COLUMN_* en haut de ce script."
-        )
-
-    df[COLUMN_DATETIME] = pd.to_datetime(df[COLUMN_DATETIME])
-    return df
+def load_clean_data():
+    return pd.read_csv(CLEAN_FILE, parse_dates=["date_heure"])
 
 
-def upsert_dim_city(engine, df):
-    cities = df[[COLUMN_CITY_NAME, COLUMN_COUNTRY, COLUMN_LAT, COLUMN_LON]].drop_duplicates()
+def build_dim_city(df):
+    cities = df[["ville", "pays", "latitude", "longitude"]].drop_duplicates()
+    return cities.rename(columns={"ville": "name", "pays": "country"})
 
+
+def build_dim_time(df):
+    dt = df["date_heure"].dt.tz_localize(None)
+    times = pd.DataFrame({"date": dt.dt.date, "hour": dt.dt.hour}).drop_duplicates()
+    times["day_of_week"] = pd.to_datetime(times["date"]).dt.day_name()
+    times["is_weekend"] = pd.to_datetime(times["date"]).dt.weekday >= 5
+    times["month"] = pd.to_datetime(times["date"]).dt.month
+    times["year"] = pd.to_datetime(times["date"]).dt.year
+    return times
+
+
+def load_warehouse():
+    engine = create_engine(DATABASE_URL)
+    df = load_clean_data()
+
+    run_suffix = uuid.uuid4().hex[:8]
+    staging_city = f"staging_city_{run_suffix}"
+    staging_time = f"staging_time_{run_suffix}"
+    staging_fact = f"staging_fact_{run_suffix}"
+
+    # 1. dim_city
+    dim_city_df = build_dim_city(df)
+    dim_city_df.to_sql(staging_city, engine, if_exists="replace", index=False)
     with engine.begin() as conn:
-        for _, row in cities.iterrows():
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO dim_city (name, country, latitude, longitude)
-                    VALUES (:name, :country, :lat, :lon)
-                    ON CONFLICT (name, country) DO NOTHING
-                    """
-                ),
-                {
-                    "name": row[COLUMN_CITY_NAME],
-                    "country": row[COLUMN_COUNTRY],
-                    "lat": row[COLUMN_LAT],
-                    "lon": row[COLUMN_LON],
-                },
-            )
-    print(f"dim_city : {len(cities)} villes traitées (insert si nouvelles).")
+        conn.execute(text(f"""
+            INSERT INTO dim_city (name, country, latitude, longitude)
+            SELECT name, country, latitude, longitude FROM {staging_city}
+            ON CONFLICT (name, country) DO NOTHING
+        """))
+        conn.execute(text(f"DROP TABLE {staging_city}"))
+    print(f"dim_city : {len(dim_city_df)} villes traitées")
 
-
-def upsert_dim_time(engine, df):
-    timestamps = df[[COLUMN_DATETIME]].drop_duplicates()
-
+    # 2. dim_time
+    dim_time_df = build_dim_time(df)
+    dim_time_df.to_sql(staging_time, engine, if_exists="replace", index=False)
     with engine.begin() as conn:
-        for _, row in timestamps.iterrows():
-            dt: datetime = row[COLUMN_DATETIME]
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO dim_time
-                        (date, hour, day_of_week, is_weekend, month, year)
-                    VALUES
-                        (:date, :hour, :dow, :is_weekend, :month, :year)
-                    ON CONFLICT (date, hour) DO NOTHING
-                    """
-                ),
-                {
-                    "date": dt.date(),
-                    "hour": dt.hour,
-                    "dow": dt.strftime("%A"),
-                    "is_weekend": dt.weekday() >= 5,
-                    "month": dt.month,
-                    "year": dt.year,
-                },
-            )
-    print(f"dim_time : {len(timestamps)} horodatages traités (insert si nouveaux).")
+        conn.execute(text(f"""
+            INSERT INTO dim_time (date, hour, day_of_week, is_weekend, month, year)
+            SELECT date, hour, day_of_week, is_weekend, month, year FROM {staging_time}
+            ON CONFLICT (date, hour) DO NOTHING
+        """))
+        conn.execute(text(f"DROP TABLE {staging_time}"))
+    print(f"dim_time : {len(dim_time_df)} tranches horaires traitées")
 
+    # 3. Mappings
+    with engine.connect() as conn:
+        city_map = pd.read_sql("SELECT id_city, name FROM dim_city", conn)
+        time_map = pd.read_sql("SELECT id_time, date, hour FROM dim_time", conn)
 
-def upsert_facts(engine, df):
-    present_pollutants = [c for c in POLLUTANT_COLUMNS if c in df.columns]
-    if not present_pollutants:
-        print("ATTENTION : aucune colonne de polluant reconnue dans le CSV.")
+    df["date"] = df["date_heure"].dt.tz_localize(None).dt.date
+    df["hour"] = df["date_heure"].dt.tz_localize(None).dt.hour
+    df = df.merge(city_map, left_on="ville", right_on="name")
+    df = df.merge(time_map, on=["date", "hour"])
 
+    pollutants = ["aqi", "co", "no", "no2", "o3", "so2", "pm2_5", "pm10", "nh3"]
+    fact_df = df[["id_time", "id_city"] + pollutants]
+    fact_df = fact_df.drop_duplicates(subset=["id_time", "id_city"], keep="last")
+
+    # 4. fact_aqi
+    fact_df.to_sql(staging_fact, engine, if_exists="replace", index=False)
     with engine.begin() as conn:
-        city_map = {
-            (r["name"], r["country"]): r["id_city"]
-            for r in conn.execute(text("SELECT id_city, name, country FROM dim_city")).mappings()
-        }
-        time_map = {
-            (r["date"], r["hour"]): r["id_time"]
-            for r in conn.execute(text("SELECT id_time, date, hour FROM dim_time")).mappings()
-        }
-
-        inserted = 0
-        for _, row in df.iterrows():
-            city_id = city_map.get((row[COLUMN_CITY_NAME], row[COLUMN_COUNTRY]))
-            dt = pd.Timestamp(row[COLUMN_DATETIME]).to_pydatetime()
-            time_id = time_map.get((dt.date(), dt.hour))
-            if city_id is None or time_id is None:
-                continue
-
-            values = {"id_city": city_id, "id_time": time_id}
-            for col in present_pollutants:
-                values[col] = row[col] if pd.notna(row[col]) else None
-
-            cols = ", ".join(values.keys())
-            placeholders = ", ".join(f":{k}" for k in values.keys())
-            update_cols = ", ".join(f"{c} = EXCLUDED.{c}" for c in present_pollutants)
-
-            conn.execute(
-                text(
-                    f"""
-                    INSERT INTO fact_aqi ({cols})
-                    VALUES ({placeholders})
-                    ON CONFLICT (id_time, id_city) DO UPDATE SET {update_cols}
-                    """
-                ),
-                values,
-            )
-            inserted += 1
-
-    print(f"fact_aqi : {inserted} lignes insérées/mises à jour.")
-
-
-def main():
-    engine = get_engine()
-    df = load_clean_csv()
-
-    n_cities = df[COLUMN_CITY_NAME].nunique()
-    print(f"Lecture de clean/aqi_clean.csv : {len(df)} lignes, {n_cities} villes.")
-
-    upsert_dim_city(engine, df)
-    upsert_dim_time(engine, df)
-    upsert_facts(engine, df)
-
-    print("Chargement terminé.")
+        conn.execute(text(f"""
+            INSERT INTO fact_aqi (id_time, id_city, {", ".join(pollutants)})
+            SELECT id_time, id_city, {", ".join(pollutants)} FROM {staging_fact}
+            ON CONFLICT (id_time, id_city) DO UPDATE SET
+                {", ".join(f"{p} = EXCLUDED.{p}" for p in pollutants)}
+        """))
+        conn.execute(text(f"DROP TABLE {staging_fact}"))
+    print(f"fact_aqi : {len(fact_df)} lignes chargées")
 
 
 if __name__ == "__main__":
-    main()
+    load_warehouse()
