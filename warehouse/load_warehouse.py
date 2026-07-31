@@ -16,8 +16,6 @@ COLUMN_DATETIME = "datetime"
 
 POLLUTANT_COLUMNS = ["aqi", "co", "no", "no2", "o3", "so2", "pm2_5", "pm10", "nh3"]
 
-JOURS_FR = None
-
 
 def get_engine():
     load_dotenv()
@@ -56,13 +54,13 @@ def upsert_dim_city(engine, df):
             conn.execute(
                 text(
                     """
-                    INSERT INTO dim_city (city_name, country, latitude, longitude)
-                    VALUES (:city_name, :country, :lat, :lon)
-                    ON CONFLICT (city_name, country) DO NOTHING
+                    INSERT INTO dim_city (name, country, latitude, longitude)
+                    VALUES (:name, :country, :lat, :lon)
+                    ON CONFLICT (name, country) DO NOTHING
                     """
                 ),
                 {
-                    "city_name": row[COLUMN_CITY_NAME],
+                    "name": row[COLUMN_CITY_NAME],
                     "country": row[COLUMN_COUNTRY],
                     "lat": row[COLUMN_LAT],
                     "lon": row[COLUMN_LON],
@@ -81,21 +79,19 @@ def upsert_dim_time(engine, df):
                 text(
                     """
                     INSERT INTO dim_time
-                        (full_datetime, date, hour, day, month, year, day_of_week, is_weekend)
+                        (date, hour, day_of_week, is_weekend, month, year)
                     VALUES
-                        (:full_dt, :date, :hour, :day, :month, :year, :dow, :is_weekend)
-                    ON CONFLICT (full_datetime) DO NOTHING
+                        (:date, :hour, :dow, :is_weekend, :month, :year)
+                    ON CONFLICT (date, hour) DO NOTHING
                     """
                 ),
                 {
-                    "full_dt": dt,
                     "date": dt.date(),
                     "hour": dt.hour,
-                    "day": dt.day,
-                    "month": dt.month,
-                    "year": dt.year,
                     "dow": dt.strftime("%A"),
                     "is_weekend": dt.weekday() >= 5,
+                    "month": dt.month,
+                    "year": dt.year,
                 },
             )
     print(f"dim_time : {len(timestamps)} horodatages traités (insert si nouveaux).")
@@ -108,22 +104,23 @@ def upsert_facts(engine, df):
 
     with engine.begin() as conn:
         city_map = {
-            (r["city_name"], r["country"]): r["city_id"]
-            for r in conn.execute(text("SELECT city_id, city_name, country FROM dim_city")).mappings()
+            (r["name"], r["country"]): r["id_city"]
+            for r in conn.execute(text("SELECT id_city, name, country FROM dim_city")).mappings()
         }
         time_map = {
-            r["full_datetime"]: r["time_id"]
-            for r in conn.execute(text("SELECT time_id, full_datetime FROM dim_time")).mappings()
+            (r["date"], r["hour"]): r["id_time"]
+            for r in conn.execute(text("SELECT id_time, date, hour FROM dim_time")).mappings()
         }
 
         inserted = 0
         for _, row in df.iterrows():
             city_id = city_map.get((row[COLUMN_CITY_NAME], row[COLUMN_COUNTRY]))
-            time_id = time_map.get(pd.Timestamp(row[COLUMN_DATETIME]).to_pydatetime())
+            dt = pd.Timestamp(row[COLUMN_DATETIME]).to_pydatetime()
+            time_id = time_map.get((dt.date(), dt.hour))
             if city_id is None or time_id is None:
                 continue
 
-            values = {"city_id": city_id, "time_id": time_id}
+            values = {"id_city": city_id, "id_time": time_id}
             for col in present_pollutants:
                 values[col] = row[col] if pd.notna(row[col]) else None
 
@@ -134,23 +131,24 @@ def upsert_facts(engine, df):
             conn.execute(
                 text(
                     f"""
-                    INSERT INTO fact_aqi_measures ({cols})
+                    INSERT INTO fact_aqi ({cols})
                     VALUES ({placeholders})
-                    ON CONFLICT (city_id, time_id) DO UPDATE SET {update_cols}
+                    ON CONFLICT (id_time, id_city) DO UPDATE SET {update_cols}
                     """
                 ),
                 values,
             )
             inserted += 1
 
-    print(f"fact_aqi_measures : {inserted} lignes insérées/mises à jour.")
+    print(f"fact_aqi : {inserted} lignes insérées/mises à jour.")
 
 
 def main():
     engine = get_engine()
     df = load_clean_csv()
 
-    print(f"Lecture de clean/aqi_clean.csv : {len(df)} lignes, {df[COLUMN_CITY_NAME].nunique()} villes.")
+    n_cities = df[COLUMN_CITY_NAME].nunique()
+    print(f"Lecture de clean/aqi_clean.csv : {len(df)} lignes, {n_cities} villes.")
 
     upsert_dim_city(engine, df)
     upsert_dim_time(engine, df)
