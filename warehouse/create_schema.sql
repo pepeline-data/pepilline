@@ -1,46 +1,43 @@
-DROP TABLE IF EXISTS fact_aqi_measures;
+DROP TABLE IF EXISTS fact_aqi;
 DROP TABLE IF EXISTS dim_time;
 DROP TABLE IF EXISTS dim_city;
 
 CREATE TABLE dim_city (
-    city_id     SERIAL PRIMARY KEY,
-    city_name   VARCHAR(100)   NOT NULL,
-    country     VARCHAR(100)   NOT NULL,
-    latitude    DOUBLE PRECISION NOT NULL,
-    longitude   DOUBLE PRECISION NOT NULL,
-    UNIQUE (city_name, country)
+    id_city     SERIAL PRIMARY KEY,
+    name        VARCHAR(100) NOT NULL,
+    country     VARCHAR(100) NOT NULL,
+    latitude    NUMERIC(9,6) NOT NULL,
+    longitude   NUMERIC(9,6) NOT NULL,
+    UNIQUE (name, country)
 );
 
 CREATE TABLE dim_time (
-    time_id       SERIAL PRIMARY KEY,
-    full_datetime TIMESTAMP NOT NULL UNIQUE,
-    date          DATE        NOT NULL,
-    hour          SMALLINT    NOT NULL CHECK (hour BETWEEN 0 AND 23),
-    day           SMALLINT    NOT NULL,
-    month         SMALLINT    NOT NULL,
-    year          SMALLINT    NOT NULL,
-    day_of_week   VARCHAR(10) NOT NULL,
-    is_weekend    BOOLEAN     NOT NULL
+    id_time         SERIAL PRIMARY KEY,
+    date            DATE NOT NULL,
+    hour            SMALLINT NOT NULL CHECK (hour BETWEEN 0 AND 23),
+    day_of_week     VARCHAR(10) NOT NULL,   -- e.g. 'Monday'
+    is_weekend      BOOLEAN NOT NULL,
+    month           SMALLINT NOT NULL CHECK (month BETWEEN 1 AND 12),
+    year            SMALLINT NOT NULL,
+    UNIQUE (date, hour)
 );
 
-CREATE TABLE fact_aqi_measures (
-    fact_id     SERIAL PRIMARY KEY,
-    city_id     INTEGER NOT NULL REFERENCES dim_city(city_id),
-    time_id     INTEGER NOT NULL REFERENCES dim_time(time_id),
-
+CREATE TABLE fact_aqi (
+    id_fact     SERIAL PRIMARY KEY,
+    id_time     INTEGER NOT NULL REFERENCES dim_time(id_time),
+    id_city     INTEGER NOT NULL REFERENCES dim_city(id_city),
     aqi         SMALLINT,
-    co          DOUBLE PRECISION,
-    no          DOUBLE PRECISION,
-    no2         DOUBLE PRECISION,
-    o3          DOUBLE PRECISION,
-    so2         DOUBLE PRECISION,
-    pm2_5       DOUBLE PRECISION,
-    pm10        DOUBLE PRECISION,
-    nh3         DOUBLE PRECISION,
-
-    UNIQUE (city_id, time_id)
+    co          NUMERIC(10,4),
+    no          NUMERIC(10,4),
+    no2         NUMERIC(10,4),
+    o3          NUMERIC(10,4),
+    so2         NUMERIC(10,4),
+    pm2_5       NUMERIC(10,4),
+    pm10        NUMERIC(10,4),
+    nh3         NUMERIC(10,4),
+    UNIQUE (id_time, id_city)
 );
 
-CREATE INDEX idx_fact_city ON fact_aqi_measures(city_id);
-CREATE INDEX idx_fact_time ON fact_aqi_measures(time_id);
+CREATE INDEX idx_fact_aqi_city ON fact_aqi(id_city);
+CREATE INDEX idx_fact_aqi_time ON fact_aqi(id_time);
 CREATE INDEX idx_dim_time_date ON dim_time(date);
